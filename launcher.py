@@ -6,7 +6,13 @@ import json
 import time
 import platform
 import psutil
-import winreg  # <--- Đã thêm winreg để đọc thông số chuẩn xác từ lõi Windows
+
+# Xử lý nhập winreg an toàn để không chết trên Mac
+try:
+    import winreg
+except ImportError:
+    winreg = None
+
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QFrame, QProgressBar, QPushButton, QTextEdit, 
                              QGraphicsDropShadowEffect, QMessageBox)
@@ -23,7 +29,7 @@ if getattr(sys, 'frozen', False) or '__compiled__' in globals():
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MAIN_APP_EXE = os.path.join(BASE_DIR, "main.exe")
+MAIN_APP_EXE = os.path.join(BASE_DIR, "main.exe" if platform.system() == "Windows" else "main")
 VERSION_FILE = os.path.join(BASE_DIR, "version.txt")
 
 def get_local_version():
@@ -57,16 +63,14 @@ class DiagnosticWorker(QThread):
             all_clear = True
             local_ver = get_local_version()
             self.log_signal.emit(f"[SYS] Phiên bản hiện tại: v{local_ver}")
-            time.sleep(1)  # <--- Sửa từ self.sleep thành time.sleep chống crash
+            time.sleep(1)
 
             # 1. KIỂM TRA BẢN CẬP NHẬT TỪ FIREBASE (AUTO-UPDATE)
             self.log_signal.emit("[SYS] Đang kiểm tra bản cập nhật...")
             self.status_signal.emit("update", "Đang kiểm tra...", "#FFB200")
             
             try:
-                # ---> TỰ ĐỘNG CHỌN NHÁNH FIREBASE DỰA VÀO VERSION <---
                 firebase_url = get_firebase_config_url(local_ver)
-                # In ra nhánh Firebase để mày dễ check:
                 self.log_signal.emit(f"[SYS] Đang Check nhánh: {firebase_url.split('/')[-1].replace('.json', '')}")
                 
                 res = urllib.request.urlopen(firebase_url, timeout=5)
@@ -84,12 +88,16 @@ class DiagnosticWorker(QThread):
                     self.log_signal.emit("[UPDATE] Đang tải bản cập nhật. Vui lòng không tắt máy...")
                     self.status_signal.emit("update", f"Đang tải v{latest_ver}...", "#00B4DB")
                     
-                    temp_exe = os.path.join(BASE_DIR, "main_update_temp.exe")
+                    temp_exe = os.path.join(BASE_DIR, "main_update_temp.exe" if platform.system() == "Windows" else "main_update_temp")
                     urllib.request.urlretrieve(dl_url, temp_exe)
                     
                     if os.path.exists(MAIN_APP_EXE):
                         os.remove(MAIN_APP_EXE)
                     os.rename(temp_exe, MAIN_APP_EXE)
+                    
+                    # Cấp quyền thực thi nếu ở trên Mac
+                    if platform.system() == "Darwin":
+                        os.chmod(MAIN_APP_EXE, 0o755)
                     
                     with open(VERSION_FILE, "w") as f: 
                         f.write(latest_ver)
@@ -109,7 +117,7 @@ class DiagnosticWorker(QThread):
             self.log_signal.emit("[SYS] Rà soát File hệ thống...")
             if not os.path.exists(MAIN_APP_EXE):
                 self.status_signal.emit("files", "❌ Thiếu file hệ thống", "#FF4A4A")
-                self.log_signal.emit(f"[ERROR] KHÔNG TÌM THẤY FILE CHÍNH 'main.exe'.")
+                self.log_signal.emit(f"[ERROR] KHÔNG TÌM THẤY FILE CHÍNH '{os.path.basename(MAIN_APP_EXE)}'.")
                 all_clear = False
             else:
                 self.status_signal.emit("files", "✅ Đầy đủ", "#00E6A8")
@@ -117,9 +125,10 @@ class DiagnosticWorker(QThread):
 
             time.sleep(1)
 
-            # 3. MÔI TRƯỜNG WINDOWS
-            self.status_signal.emit("cpp", "✅ Native Windows", "#00E6A8")
-            self.log_signal.emit("[SYS] Môi trường Windows đã sẵn sàng.")
+            # 3. MÔI TRƯỜNG OS
+            os_name = "macOS" if platform.system() == "Darwin" else "Windows"
+            self.status_signal.emit("cpp", f"✅ Native {os_name}", "#00E6A8")
+            self.log_signal.emit(f"[SYS] Môi trường {os_name} đã sẵn sàng.")
 
             self.done_signal.emit(all_clear)
             
@@ -161,8 +170,8 @@ class AppRunnerWorker(QThread):
                 self.log_signal.emit(f"\n[CRITICAL ERROR] AEKA bị sập! Mã lỗi: {process.returncode}")
                 self.log_signal.emit(f"[TRACEBACK]\n{stderr}")
                 
-                desktop = os.path.join(os.path.join(os.environ['USERPROFILE']), 'Desktop')
-                log_path = os.path.join(desktop, "AEKA_Crash_Report_Win.txt")
+                desktop = os.path.join(os.path.expanduser('~'), 'Desktop')
+                log_path = os.path.join(desktop, "AEKA_Crash_Report.txt")
                 with open(log_path, "w", encoding="utf-8") as f:
                     f.write(f"EXIT CODE: {process.returncode}\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}")
                 
@@ -175,15 +184,16 @@ class AppRunnerWorker(QThread):
             self.done_signal.emit(False, f"Bị chặn quyền truy cập hoặc mất file:\n{MAIN_APP_EXE}")
 
 # ==========================================
-# GIAO DIỆN CHÍNH (GUI) - WINDOWS EDITION
+# GIAO DIỆN CHÍNH (GUI)
 # ==========================================
 class ModernLauncher(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AEKA Launcher - Windows Edition")
+        edition = "macOS" if platform.system() == "Darwin" else "Windows"
+        self.setWindowTitle(f"AEKA Launcher - {edition} Edition")
         self.resize(850, 680)
         self.setStyleSheet("""
-            QWidget { background-color: #09090C; color: #E2E8F0; font-family: 'Segoe UI', system-ui; }
+            QWidget { background-color: #09090C; color: #E2E8F0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
             QLabel { background: transparent; }
             QFrame#Card { background-color: #111118; border-radius: 14px; border: 1px solid #1E1E28; }
             QProgressBar { background-color: #1A1A24; border-radius: 6px; text-align: center; border: none; max-height: 12px; }
@@ -194,7 +204,7 @@ class ModernLauncher(QWidget):
             QPushButton#BtnRun:disabled { background: #2A2A35; color: #666; }
             QPushButton#BtnForce { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #cb2d3e, stop:1 #ef473a); color: white; font-weight: bold; font-size: 15px; border-radius: 10px; border: none; padding: 15px; }
             QPushButton#BtnForce:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #E03345, stop:1 #FA5548); }
-            QTextEdit { background-color: #050508; border: 1px solid #1E1E28; border-radius: 10px; padding: 15px; color: #00E6A8; font-family: 'Consolas'; font-size: 13px; }
+            QTextEdit { background-color: #050508; border: 1px solid #1E1E28; border-radius: 10px; padding: 15px; color: #00E6A8; font-family: 'Consolas', monospace; font-size: 13px; }
         """)
 
         self.labels_map = {}
@@ -218,13 +228,15 @@ class ModernLauncher(QWidget):
         widget.setGraphicsEffect(shadow)
 
     def setup_ui(self):
+        edition = "macOS" if platform.system() == "Darwin" else "Windows"
+        
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(30, 30, 30, 30)
 
         header_layout = QVBoxLayout()
         lbl_title = QLabel("AEKA LAUNCHER")
         lbl_title.setStyleSheet("font-size: 28px; font-weight: 900; color: #FFFFFF; letter-spacing: 1px;")
-        lbl_sub = QLabel("Diagnostic & Startup Environment (Windows Edition)")
+        lbl_sub = QLabel(f"Diagnostic & Startup Environment ({edition} Edition)")
         lbl_sub.setStyleSheet("font-size: 13px; font-weight: 500; color: #8888A0;")
         header_layout.addWidget(lbl_title); header_layout.addWidget(lbl_sub)
         main_layout.addLayout(header_layout)
@@ -333,30 +345,47 @@ class ModernLauncher(QWidget):
             os_name = f"{platform.system()} {platform.release()}"
             try:
                 build_num = int(platform.version().split('.')[2])
-                if build_num >= 22000:
+                if build_num >= 22000 and platform.system() == "Windows":
                     os_name = "Windows 11"
             except: pass
             self.lbl_os.setText(os_name)
             
-            try:
-                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-                cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
-                cpu_name = cpu_name.strip()
-            except:
-                cpu_name = platform.processor()
+            # --- LẤY TÊN CPU CHUẨN CHO CẢ WIN LẪN MAC ---
+            cpu_name = platform.processor()
+            if platform.system() == "Windows" and winreg:
+                try:
+                    key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                    cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                    cpu_name = cpu_name.strip()
+                except: pass
+            elif platform.system() == "Darwin":
+                try:
+                    cpu_name = subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"], text=True).strip()
+                except: pass
             
             self.lbl_cpu.setText(cpu_name[:35] + "..." if len(cpu_name) > 35 else cpu_name)
 
             self.lbl_py.setText("✅Compatible with Python Engine")
             self.lbl_py.setStyleSheet("color: #00E6A8; font-weight: bold; margin-bottom: 10px;")
 
-            try:
-                gpu_cmd = "powershell \"(Get-CimInstance Win32_VideoController).Name\""
-                output = subprocess.check_output(gpu_cmd, shell=True, text=True).strip().split('\n')
-                gpus = [g.strip() for g in output if g.strip()]
-                gpu_name = " + ".join(gpus) if gpus else "Windows Graphics"
-            except:
-                gpu_name = "Windows Graphics"
+            # --- LẤY TÊN GPU CHUẨN CHO CẢ WIN LẪN MAC ---
+            if platform.system() == "Windows":
+                try:
+                    gpu_cmd = "powershell \"(Get-CimInstance Win32_VideoController).Name\""
+                    output = subprocess.check_output(gpu_cmd, shell=True, text=True).strip().split('\n')
+                    gpus = [g.strip() for g in output if g.strip()]
+                    gpu_name = " + ".join(gpus) if gpus else "Windows Graphics"
+                except:
+                    gpu_name = "Windows Graphics"
+            elif platform.system() == "Darwin":
+                try:
+                    gpu_cmd = "system_profiler SPDisplaysDataType | grep Chipset"
+                    output = subprocess.check_output(gpu_cmd, shell=True, text=True).strip()
+                    gpu_name = output.split(":")[-1].strip() if output else "Apple Silicon GPU"
+                except:
+                    gpu_name = "Apple Mac Graphics"
+            else:
+                gpu_name = "Unknown Graphics"
                 
             self.lbl_gpu.setText(gpu_name[:35] + "..." if len(gpu_name) > 35 else gpu_name)
 
